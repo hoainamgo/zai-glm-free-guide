@@ -132,16 +132,48 @@ print(resp.choices[0].message.content)
 
 ---
 
-## 5️⃣ CẤU HÌNH HERMES AGENT
+## 5️⃣ CẤU HÌNH HERMES AGENT (đã test thực tế trên Lysa/agent2 ✅)
 
-Thêm provider `OpenAI Compatible` trong config Hermes:
-```ini
-[providers.zai]
-type = "openai"
-base_url = "https://api.z.ai/api/paas/v4"
-api_key = "YOUR_API_KEY"
-model = "glm-4.7-flash"
+Config Hermes dùng **YAML** (`config.yaml`), KHÔNG phải `.ini`. Key đặt trong `.env`, config trỏ qua `key_env`:
+
+```yaml
+model:
+  default: glm-4.7-flash
+  provider: zai
+providers:
+  zai:
+    base_url: https://api.z.ai/api/paas/v4
+    key_env: ZAI_API_KEY          # tên biến, KHÔNG dán key vào config
+    extra_body:                    # ⚠️ BẮT BUỘC — nếu thiếu, content trả về RỖNG
+      thinking:
+        type: disabled
 ```
+
+Thêm key vào `.env` (perms 600): `echo 'ZAI_API_KEY=...' >> ~/.hermes/.env` (hoặc profile `.env` tương ứng, vd `~/.hermes/profiles/agent2/.env` cho Lysa).
+
+### ⚠️ 3 pitfall khi cắm vào Hermes (mất nhiều round-trip nếu không biết)
+
+1. **`extra_body.thinking.type: disabled` là BẮT BUỘC.** Hermes không tự thêm flag thinking. Không có nó → GLM-4.7-Flash trả `content=''` (rỗng), token đổ hết vào `reasoning_content`. Provider config Hermes hỗ trợ `extra_body` — forward verbatim vào mọi request. Đây là fix đúng, không cần wrapper script.
+
+2. **Tên model free là `glm-4.7-flash`, KHÔNG phải `glm-4.7`.** `glm-4.7` là bản trả phí ($0.6/$0.11 per 1M). Dễ nhầm khi Hermes gợi ý "Similar models: glm-4.7, glm-4.5-air, glm-4.6".
+
+3. **Z.ai `/models` listing KHÔNG trả `glm-4.7-flash`** (chỉ trả glm-4.5/4.6/4.7/5.x). Nên UI picker `/model` của Hermes KHÔNG hiện `glm-4.7-flash` — NHƯNG model vẫn gọi được bình thường khi set thẳng trong `config.yaml default:`. Đừng hoang mang khi "không thấy model trong list"; test bằng curl thực tế thay vì tin listing. Xóa cache (`rm provider_models_cache.json models_dev_cache.json context_length_cache.yaml` trong profile dir) không giúp hiện — vì listing gốc từ Z.ai đã thiếu.
+   **FIX để hiện trong picker:** Hermes có curated list `_PROVIDER_MODELS["zai"]` trong `~/.hermes/hermes-agent/hermes_cli/models.py` (~line 275). Thêm dòng `"glm-4.7-flash",` vào list đó → picker sẽ hiện. ⚠️ Đây là patch CORE Hermes → `hermes update` sẽ ghi đè, phải re-apply sau mỗi lần update.
+
+4. **⭐ ROOT CAUSE khi "Model không chọn được" trong picker: provider `zai` PHẢI có trong `auth.json` của profile.** Hermes chỉ liệt kê model của provider đã "authenticated" (có entry trong auth_store/auth.json). Config.yaml + models.py đúng mà picker vẫn trống nghĩa là thiếu bước này. Kiểm tra: `python3 -c "import json; print(list(json.load(open('auth.json'))['providers'].keys()))"` chạy trong profile dir — nếu chỉ có `nous` mà không có `zai` → đó là nguyên nhân. FIX (thêm zai vào auth.json, key lấy từ .env):
+   ```python
+   import json
+   p='auth.json'; d=json.load(open(p))
+   d.setdefault('providers',{})['zai']={'authenticated':True,'api_key':KEY,'base_url':'https://api.z.ai/api/paas/v4','provider_id':'zai'}
+   json.dump(d,open(p,'w'),indent=2)
+   ```
+   Hermes nhận key qua env var names `GLM_API_KEY` / `ZAI_API_KEY` / `Z_AI_API_KEY` (xem auth.py PROVIDER_REGISTRY). Bản chính thức: `hermes --profile <name> auth login zai` cũng ghi vào auth.json — dùng nếu có sẵn CLI flow.
+
+**Thứ tự debug "model không hiện/không chọn được" (đi từ rẻ→đắt):** (a) config.yaml có `default` + `provider` + `extra_body.thinking.disabled`? → (b) tên model đúng bản free `glm-4.7-flash`? → (c) `auth.json` có entry provider chưa? (root cause hay gặp nhất) → (d) curated `_PROVIDER_MODELS` trong models.py có model chưa? → (e) đã restart gateway profile chưa?
+
+5. **Config.yaml `default` có thể bị REVERT giữa các lần sửa.** Trong 1 phiên, `default: glm-4.7-flash` đã bị ghi đè ngược về `glm-4.7` (patch tool cảnh báo "modified since you last read / external edit"). FIX: sau MỖI lần sửa `default`, **đọc lại ngay** (`grep 'default:' config.yaml`) xác nhận không bị revert; nếu revert, sửa lại bằng python read→replace→write rồi verify lần nữa TRƯỚC khi restart gateway. Đừng tin patch báo thành công là xong — verify trên disk.
+
+Sau khi patch config → cần **restart gateway** của profile để áp dụng (`hermes --profile <name> gateway restart`). Lưu ý: một số môi trường cấm agent tự restart gateway của profile khác — khi đó đưa lệnh cho user tự chạy.
 
 ---
 
@@ -195,6 +227,11 @@ curl -s -o /dev/null -w "HTTP %{http_code}" "https://api.z.ai/api/paas/v4/models
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 → HTTP 200 = key hợp lệ.
+
+### ❓ Phân biệt lỗi 429 (đọc kỹ `code`, đừng nhầm)
+- `code 1113` = **"Insufficient balance or no resource package"** (余额不足) → tài khoản HẾT gói tài nguyên, phải nạp/kích hoạt gói free. Model free vẫn cần account có resource package.
+- `code 1302` = **"Rate limit reached"** → chỉ throttle tạm thời (gọi nhiều/cao điểm), đợi vài giây rồi retry là được. KHÔNG phải hết tiền.
+- Đổi được từ `not found` → `1302` khi sửa tên model đúng nghĩa là model đã tồn tại, chỉ đang bị rate-limit — retry.
 
 ### ❓ Có cần số điện thoại TQ không?
 → **Không**. Đăng ký bằng email/Google là đủ (đã verify qua tài liệu + test thực tế).
