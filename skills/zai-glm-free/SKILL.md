@@ -15,6 +15,21 @@ triggers:
   - "hướng dẫn z.ai"
   - "free llm api"
   - "thinking mode"
+  # Class-level entry points — this skill also documents how to wire ANY
+  # custom OpenAI-compatible provider into a Hermes profile + debug the picker.
+  - "model không chọn được"
+  - "model không hiện trong picker"
+  - "model not found in picker"
+  - "add custom provider hermes"
+  - "custom openai-compatible provider"
+  - "provider trong auth.json"
+  - "content trả về rỗng"
+  - "reasoning_content rỗng"
+  - "hcnsec"
+  - "api.hcnsec.cn"
+  - "thêm provider mới hermes"
+  - "ProviderConfig auth.py"
+  - "aggregator openai-compatible"
 metadata:
   free: true
   context: 200K
@@ -169,7 +184,29 @@ Thêm key vào `.env` (perms 600): `echo 'ZAI_API_KEY=...' >> ~/.hermes/.env` (h
    ```
    Hermes nhận key qua env var names `GLM_API_KEY` / `ZAI_API_KEY` / `Z_AI_API_KEY` (xem auth.py PROVIDER_REGISTRY). Bản chính thức: `hermes --profile <name> auth login zai` cũng ghi vào auth.json — dùng nếu có sẵn CLI flow.
 
-**Thứ tự debug "model không hiện/không chọn được" (đi từ rẻ→đắt):** (a) config.yaml có `default` + `provider` + `extra_body.thinking.disabled`? → (b) tên model đúng bản free `glm-4.7-flash`? → (c) `auth.json` có entry provider chưa? (root cause hay gặp nhất) → (d) curated `_PROVIDER_MODELS` trong models.py có model chưa? → (e) đã restart gateway profile chưa?
+6. **⭐ PROVIDER HOÀN TOÀN MỚI (chưa có trong Hermes core) cần THÊM `ProviderConfig` vào `auth.py`.** `zai` đã ship sẵn trong Hermes nên chỉ cần 4 bước trên. Nhưng khi thêm provider gateway MỚI chưa từng có (vd `hcnsec` = api.hcnsec.cn), Hermes không biết provider đó → phải thêm entry vào `PROVIDER_REGISTRY` trong `~/.hermes/hermes-agent/hermes_cli/auth.py` (~line 243, ngay cạnh block `zai`):
+   ```python
+   "hcnsec": ProviderConfig(
+       id="hcnsec",
+       name="HCNSEC API",
+       auth_type="api_key",
+       inference_base_url="https://api.hcnsec.cn/v1",
+       api_key_env_vars=("HCNSEC_API_KEY",),
+       base_url_env_var="HCNSEC_BASE_URL",
+   ),
+   ```
+   → Đây là patch CORE thứ 2 (cùng `models.py`), `hermes update` sẽ ghi đè cả 2, phải re-apply. Cũng thêm `ProviderEntry("hcnsec", "HCNSEC API", "...")` vào list ProviderEntry (~line 1052 models.py) để hiện tên đẹp trong picker.
+
+**CHECKLIST đầy đủ khi thêm 1 provider OpenAI-compatible MỚI vào profile (thứ tự):**
+1. `.env`: thêm `<PROVIDER>_API_KEY=...` (chmod 600)
+2. `config.yaml`: block `providers.<name>` (base_url + key_env + `extra_body.thinking.disabled` nếu model có thinking)
+3. `auth.json`: `providers.<name> = {authenticated:True, api_key, base_url, provider_id}`
+4. `models.py`: `_PROVIDER_MODELS["<name>"] = [...]` (danh sách model đã test) + `ProviderEntry(...)`
+5. `auth.py`: `ProviderConfig(...)` trong PROVIDER_REGISTRY — **CHỈ cần nếu provider chưa có sẵn trong Hermes core**
+6. `ast.parse` verify models.py + auth.py không lỗi syntax
+7. Restart gateway profile (user tự chạy nếu bị cấm)
+
+**Thứ tự debug "model không hiện/không chọn được" (đi từ rẻ→đắt):** (a) config.yaml có `default` + `provider` + `extra_body.thinking.disabled`? → (b) tên model đúng bản free `glm-4.7-flash`? → (c) `auth.json` có entry provider chưa? (root cause hay gặp nhất) → (d) curated `_PROVIDER_MODELS` trong models.py có model chưa? → (e) provider có trong `auth.py` PROVIDER_REGISTRY chưa? (chỉ với provider mới hoàn toàn) → (f) đã restart gateway profile chưa?
 
 5. **Config.yaml `default` có thể bị REVERT giữa các lần sửa.** Trong 1 phiên, `default: glm-4.7-flash` đã bị ghi đè ngược về `glm-4.7` (patch tool cảnh báo "modified since you last read / external edit"). FIX: sau MỖI lần sửa `default`, **đọc lại ngay** (`grep 'default:' config.yaml`) xác nhận không bị revert; nếu revert, sửa lại bằng python read→replace→write rồi verify lần nữa TRƯỚC khi restart gateway. Đừng tin patch báo thành công là xong — verify trên disk.
 
@@ -256,3 +293,11 @@ curl -s -o /dev/null -w "HTTP %{http_code}" "https://api.z.ai/api/paas/v4/models
 - [Z.AI Quick Start](https://docs.z.ai/guides/overview/quick-start)
 - [OpenRouter GLM-4.7-Flash](https://openrouter.ai/models/z-ai/glm-4.7-flash)
 - [GitHub ZtoApi Registration Workflow](https://github.com/hulisang/ZtoApi/blob/main/deno/zai/zai_register.md)
+
+---
+
+## 📎 SUPPORT FILES
+- `references/probing-aggregator-apis.md` — how to discover the real model names
+  on new-api/one-api style aggregator gateways (DeepSeek/GLM/Step/Kimi/MiniMax
+  distributors like hcnsec.cn/iamhc.cn): use `model:"auto"` + `/v1/models`, don't
+  guess names, watch the exact host.
